@@ -181,7 +181,6 @@ class CVRP:
                     and (node, j) not in visited
                 ):
                     visited.add((node, j))
-                    print(node, j, k, x[(node, j, k)].name, x[(node, j, k)].varValue)
                     path.extend(dfs(j, k, visited))
                     break
             return path
