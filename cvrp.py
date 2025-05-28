@@ -53,13 +53,18 @@ class CVRP:
             dimension=instance_data["dimension"],
             edge_weight_type=instance_data["edge_weight_type"],
             capacity=instance_data["capacity"],
-            node_coords=instance_data["node_coord"],
+            node_coords=instance_data["node_coord"]
+            if "node_coord" in instance_data
+            else None,
             demands=instance_data["demand"],
             depots=instance_data["depot"],
             distances=instance_data["edge_weight"],
         )
 
     def plot_solution(self, paths: list):
+        if self.node_coords is None or not paths:
+            print("No node coordinates or paths to plot.")
+            return
         plt.figure(figsize=(10, 8))
 
         all_node_x = [self.node_coords[node_id][0] for node_id in range(self.dimension)]
@@ -100,22 +105,47 @@ class CVRP:
         plt.grid(True)
         plt.show()
 
-    def solve(self, log=False) -> tuple[float, list[int]]:
+    def solve(self, num_trucks, log=False) -> tuple[float, list[int]]:
+        prob, x = self._solve_lp(num_trucks=num_trucks, relaxed=False, log=log)
+        paths = self._reconstruct_paths_ilp(x, self.dimension, num_trucks)
+
+        return pulp.value(prob.objective), paths
+
+    def _solve_lp(
+        self, num_trucks, relaxed=False, log=False
+    ) -> tuple[pulp.LpProblem, dict[tuple[int, int, int], pulp.LpVariable]]:
         prob = pulp.LpProblem("CVRP", pulp.LpMinimize)
-        p = 3  # The number of trucks is not defined in the vrp file format. Not sure what to put here but it needs to be changed.
+        p = num_trucks  # The number of trucks is not defined in the vrp file format. Not sure what to put here but it needs to be changed.
         n = self.dimension
         customer_nodes = [i for i in range(n) if i not in self.depots]
 
         # Variables
         indices = [(i, j, k) for i in range(n) for j in range(n) for k in range(p)]
         x = pulp.LpVariable.dicts(
-            name="x", indices=indices, cat=pulp.LpBinary, lowBound=0, upBound=1
+            name="x",
+            indices=indices,
+            cat=pulp.LpBinary if not relaxed else pulp.LpContinuous,
+            lowBound=0,
+            upBound=1,
         )
 
         # Goal function
         prob += pulp.lpSum(self.distances[i][j] * x[(i, j, k)] for i, j, k in indices)
 
-        # Constraints
+        self._add_base_constraints(prob, customer_nodes, x, n, p)
+        self._eliminate_subtour_constraints(
+            prob, customer_nodes, x, n, p, formulation="mtz" if not relaxed else "dfj"
+        )
+
+        options = pulp.PULP_CBC_CMD(
+            msg=log,
+            timeLimit=60,
+        )
+        prob.solve(options)
+
+        return prob, x
+
+    def _add_base_constraints(self, prob, customer_nodes, x, n, p):
         # No traveling from itself to itself
         for k in range(p):
             for i in range(n):
@@ -146,32 +176,69 @@ class CVRP:
                 <= self.capacity
             )
 
-        # Eliminate subtours
-        for subset_size in range(2, n - 1):
-            for subset in itertools.combinations(customer_nodes, subset_size):
-                subset_nodes = set(subset)
-                prob += (
-                    pulp.lpSum(
-                        x[(i, j, k)]
-                        for i in subset_nodes
-                        for j in range(n)
-                        if j not in subset_nodes
-                        for k in range(p)
+    def _eliminate_subtour_constraints(
+        self, prob, customer_nodes, x, n, p, formulation="dfj"
+    ):
+        # DFJ
+        if formulation == "dfj":
+            for subset_size in range(2, n - 1):
+                for subset in itertools.combinations(customer_nodes, subset_size):
+                    subset_nodes = set(subset)
+                    prob += (
+                        pulp.lpSum(
+                            x[(i, j, k)]
+                            for i in subset_nodes
+                            for j in range(n)
+                            if j not in subset_nodes
+                            for k in range(p)
+                        )
+                        >= 1
                     )
-                    >= 1
-                )
-        options = pulp.PULP_CBC_CMD(
-            timeLimit=60,
-            gapRel=0.05,
-            # maxNodes=1000,
-            msg=log,
-        )
-        prob.solve(options)
-        paths = self._reconstruct_paths(x, n, p)
+        elif formulation == "mtz":
+            n_customers = len(customer_nodes)
+            all_nodes = list(range(n))  # All nodes including depots
+            u_vars = pulp.LpVariable.dicts(
+                "u_seq",  # Name for MTZ auxiliary variables
+                [(c_node, k_idx) for c_node in customer_nodes for k_idx in range(p)],
+                lowBound=0,  # Can be 0 if c_node is not visited by k_idx
+                # upBound=n_customers, # Implicitly handled by constraints below
+                cat=pulp.LpContinuous,
+            )
 
-        return pulp.value(prob.objective), paths
+            for k_idx in range(p):
+                for i_cust_node in customer_nodes:
+                    is_i_serviced_by_k = pulp.lpSum(
+                        x[(j_node, i_cust_node, k_idx)]
+                        for j_node in all_nodes
+                        if j_node != i_cust_node
+                    )
 
-    def _reconstruct_paths(self, x, n, p) -> list[int]:
+                    prob += (
+                        u_vars[(i_cust_node, k_idx)] >= is_i_serviced_by_k,
+                        f"MTZ_LowerBound_u_c{i_cust_node}_k{k_idx}",
+                    )
+                    prob += (
+                        u_vars[(i_cust_node, k_idx)]
+                        <= n_customers * is_i_serviced_by_k,
+                        f"MTZ_UpperBound_u_c{i_cust_node}_k{k_idx}",
+                    )
+
+                    for j_cust_node in customer_nodes:
+                        if i_cust_node == j_cust_node:
+                            continue
+                        prob += (
+                            u_vars[(i_cust_node, k_idx)]
+                            - u_vars[(j_cust_node, k_idx)]
+                            + n_customers * x[(i_cust_node, j_cust_node, k_idx)]
+                            <= n_customers - 1,
+                            f"MTZ_Order_c{i_cust_node}_c{j_cust_node}_k{k_idx}",
+                        )
+        else:
+            raise ValueError(
+                "Unsupported formulation for eliminating subtours. Use 'dfj' or 'mtz'."
+            )
+
+    def _reconstruct_paths_ilp(self, x, n, p) -> list[int]:
         def dfs(node, k, visited):
             path = [node]
             for j in range(n):

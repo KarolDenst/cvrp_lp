@@ -6,6 +6,7 @@ if __name__ == "__main__":
         description="Solve the Capacitated Vehicle Routing Problem (CVRP)."
     )
     parser.add_argument("file_path", type=str, help="Path to the .vrp data file.")
+    parser.add_argument("num_trucks", type=int, help="Number of trucks available.")
     parser.add_argument(
         "--log",
         action="store_true",
@@ -21,7 +22,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cvrp = CVRP.from_file(args.file_path)
-    value, paths = cvrp.solve(log=args.log)
+    value, paths = cvrp.solve(log=args.log, num_trucks=args.num_trucks)
     print(cvrp)
     print(f"Minimal tour: {value}")
     print(f"Routes: {paths}")
