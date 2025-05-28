@@ -2,6 +2,7 @@ import pulp
 import matplotlib.pyplot as plt
 import itertools
 import vrplib
+import math
 
 
 class CVRP:
@@ -105,11 +106,23 @@ class CVRP:
         plt.grid(True)
         plt.show()
 
-    def solve(self, num_trucks, log=False) -> tuple[float, list[int]]:
-        prob, x = self._solve_lp(num_trucks=num_trucks, relaxed=False, log=log)
-        paths = self._reconstruct_paths_ilp(x, self.dimension, num_trucks)
+    def solve(
+        self, num_trucks, relaxed=False, log=False
+    ) -> tuple[float, list[list[int]]]:
+        prob, x = self._solve_lp(num_trucks=num_trucks, relaxed=relaxed, log=log)
+        print(f"Status: {pulp.LpStatus[prob.status]}")
 
-        return pulp.value(prob.objective), paths
+        for k in range(num_trucks):
+            for i in range(self.dimension):
+                for j in range(self.dimension):
+                    if x[(i, j, k)].varValue > 0:
+                        print((i, j, k), x[(i, j, k)].varValue)
+        if relaxed:
+            paths = self._greedy_reconstruct_paths_lp(x, self.dimension, num_trucks)
+        else:
+            paths = self._reconstruct_paths_ilp(x, self.dimension, num_trucks)
+
+        return self._get_total_distance(paths), paths
 
     def _solve_lp(
         self, num_trucks, relaxed=False, log=False
@@ -134,7 +147,7 @@ class CVRP:
 
         self._add_base_constraints(prob, customer_nodes, x, n, p)
         self._eliminate_subtour_constraints(
-            prob, customer_nodes, x, n, p, formulation="mtz" if not relaxed else "dfj"
+            prob, customer_nodes, x, n, p, relaxed=relaxed
         )
 
         options = pulp.PULP_CBC_CMD(
@@ -163,7 +176,11 @@ class CVRP:
             prob += pulp.lpSum(x[(i, j, k)] for i in range(n) for k in range(p)) == 1
 
         # Every vehicle leaves the depot
-        # Not sure if this is required
+        for k in range(p):
+            prob += (
+                pulp.lpSum(x[(i, j, k)] for j in customer_nodes for i in self.depots)
+                == 1
+            )
 
         # Capacity constraint
         for k in range(p):
@@ -177,13 +194,34 @@ class CVRP:
             )
 
     def _eliminate_subtour_constraints(
-        self, prob, customer_nodes, x, n, p, formulation="dfj"
+        self, prob, customer_nodes, x, n, p, relaxed=False
     ):
-        # DFJ
-        if formulation == "dfj":
+        if relaxed:
+            # DFJ formulation
+            # Base form
+            # for subset_size in range(2, n - 1):
+            #     for subset in itertools.combinations(customer_nodes, subset_size):
+            #         subset_nodes = set(subset)
+            #         prob += (
+            #             pulp.lpSum(
+            #                 x[(i, j, k)]
+            #                 for i in subset_nodes
+            #                 for j in range(n)
+            #                 if j not in subset_nodes
+            #                 for k in range(p)
+            #             )
+            #             >= 1
+            #         )
+
+            # More robust form that works better for the relaxed version
+
             for subset_size in range(2, n - 1):
                 for subset in itertools.combinations(customer_nodes, subset_size):
                     subset_nodes = set(subset)
+                    current_subset_demand = sum(
+                        self.demands[node_idx] for node_idx in subset_nodes
+                    )
+                    r_S = math.ceil(current_subset_demand / self.capacity)
                     prob += (
                         pulp.lpSum(
                             x[(i, j, k)]
@@ -192,16 +230,17 @@ class CVRP:
                             if j not in subset_nodes
                             for k in range(p)
                         )
-                        >= 1
+                        >= r_S
                     )
-        elif formulation == "mtz":
+
+        else:
+            # MTZ formulation
             n_customers = len(customer_nodes)
-            all_nodes = list(range(n))  # All nodes including depots
-            u_vars = pulp.LpVariable.dicts(
-                "u_seq",  # Name for MTZ auxiliary variables
+            all_nodes = list(range(n))
+            u = pulp.LpVariable.dicts(
+                "u",
                 [(c_node, k_idx) for c_node in customer_nodes for k_idx in range(p)],
-                lowBound=0,  # Can be 0 if c_node is not visited by k_idx
-                # upBound=n_customers, # Implicitly handled by constraints below
+                lowBound=0,
                 cat=pulp.LpContinuous,
             )
 
@@ -213,32 +252,56 @@ class CVRP:
                         if j_node != i_cust_node
                     )
 
+                    prob += (u[(i_cust_node, k_idx)] >= is_i_serviced_by_k,)
                     prob += (
-                        u_vars[(i_cust_node, k_idx)] >= is_i_serviced_by_k,
-                        f"MTZ_LowerBound_u_c{i_cust_node}_k{k_idx}",
-                    )
-                    prob += (
-                        u_vars[(i_cust_node, k_idx)]
-                        <= n_customers * is_i_serviced_by_k,
-                        f"MTZ_UpperBound_u_c{i_cust_node}_k{k_idx}",
+                        u[(i_cust_node, k_idx)] <= n_customers * is_i_serviced_by_k,
                     )
 
                     for j_cust_node in customer_nodes:
                         if i_cust_node == j_cust_node:
                             continue
                         prob += (
-                            u_vars[(i_cust_node, k_idx)]
-                            - u_vars[(j_cust_node, k_idx)]
+                            u[(i_cust_node, k_idx)]
+                            - u[(j_cust_node, k_idx)]
                             + n_customers * x[(i_cust_node, j_cust_node, k_idx)]
                             <= n_customers - 1,
-                            f"MTZ_Order_c{i_cust_node}_c{j_cust_node}_k{k_idx}",
                         )
-        else:
-            raise ValueError(
-                "Unsupported formulation for eliminating subtours. Use 'dfj' or 'mtz'."
-            )
 
-    def _reconstruct_paths_ilp(self, x, n, p) -> list[int]:
+    def _greedy_reconstruct_paths_lp(self, x, n, p) -> list[list[int]]:
+        FLOW_THREASHOLD = 0.1
+
+        customer_nodes = [i for i in range(n) if i not in self.depots]
+        paths = []
+        visited = set()
+        for k in range(p):
+            path = [0]
+            current_node = 0
+            for _ in range(n + 1):
+                capacity = self.capacity
+                best_next_node = 0
+                max_val = -1
+                for j in customer_nodes:
+                    val = x[(current_node, j, k)].varValue
+                    if j == current_node or j in visited or capacity < self.demands[j]:
+                        continue
+                    if val > max_val:
+                        max_val = val
+                        best_next_node = j
+
+                if max_val >= FLOW_THREASHOLD:
+                    path.append(best_next_node)
+                    visited.add(best_next_node)
+                    current_node = best_next_node
+                else:
+                    path.append(0)
+                    paths.append(path)
+                    break
+
+        if sum(len(path) - 2 for path in paths) < n - len(self.depots):
+            print("Warning: Not all customer nodes were visited.")
+        return paths
+
+    def _reconstruct_paths_ilp(self, x, n, p) -> list[list[int]]:
         def dfs(node, k, visited):
             path = [node]
             for j in range(n):
@@ -262,3 +325,13 @@ class CVRP:
                     break
 
         return paths
+
+    def _get_total_distance(self, paths: list[list[int]]) -> float:
+        distance = 0.0
+        for path in paths:
+            current = path[0]
+            for next_node in path[1:]:
+                distance += self.distances[current][next_node]
+                current = next_node
+
+        return distance

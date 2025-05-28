@@ -15,14 +15,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plot",
         action="store_true",
-        dest="plot",
         help="Enable plotting of the solution. (default: False)",
+    )
+    parser.add_argument(
+        "--relax",
+        action="store_true",
+        help="Use ILP instead of LP. (default: False)",
     )
 
     args = parser.parse_args()
 
     cvrp = CVRP.from_file(args.file_path)
-    value, paths = cvrp.solve(log=args.log, num_trucks=args.num_trucks)
+    value, paths = cvrp.solve(
+        log=args.log, num_trucks=args.num_trucks, relaxed=args.relax
+    )
     print(cvrp)
     print(f"Minimal tour: {value}")
     print(f"Routes: {paths}")
