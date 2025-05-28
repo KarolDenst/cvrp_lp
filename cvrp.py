@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import itertools
 import vrplib
 import math
+from guided_tree import GuidedTree
+import mcts
 
 
 class CVRP:
@@ -112,13 +114,20 @@ class CVRP:
         prob, x = self._solve_lp(num_trucks=num_trucks, relaxed=relaxed, log=log)
         print(f"Status: {pulp.LpStatus[prob.status]}")
 
-        for k in range(num_trucks):
-            for i in range(self.dimension):
-                for j in range(self.dimension):
-                    if x[(i, j, k)].varValue > 0:
-                        print((i, j, k), x[(i, j, k)].varValue)
         if relaxed:
-            paths = self._greedy_reconstruct_paths_lp(x, self.dimension, num_trucks)
+            # paths = self._greedy_reconstruct_paths_lp(x, self.dimension, num_trucks)
+            # paths = self._guided_tree_reconstruct_paths_lp(
+            #     x, self.dimension, num_trucks
+            # )
+            tree = mcts.MCTSGuidedTree(
+                x,
+                self.dimension,
+                num_trucks,
+                self.distances,
+                self.capacity,
+                self.demands,
+            )
+            _, paths = tree.solve(1000000)
         else:
             paths = self._reconstruct_paths_ilp(x, self.dimension, num_trucks)
 
@@ -299,6 +308,11 @@ class CVRP:
 
         if sum(len(path) - 2 for path in paths) < n - len(self.depots):
             print("Warning: Not all customer nodes were visited.")
+        return paths
+
+    def _guided_tree_reconstruct_paths_lp(self, x, n, p) -> list[list[int]]:
+        tree = GuidedTree(x, n, p, self.distances, self.capacity, self.demands)
+        _, paths = tree.solve()
         return paths
 
     def _reconstruct_paths_ilp(self, x, n, p) -> list[list[int]]:
