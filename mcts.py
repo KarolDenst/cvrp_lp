@@ -136,7 +136,7 @@ class MCTSGuidedTree:
     def _backpropagate(self, node, score):
         while node:
             node.visits += 1
-            node.value += -score  # lower is better
+            node.value += -score
             node = node.parent
 
     def _calculate_score(self, paths):

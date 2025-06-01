@@ -261,10 +261,8 @@ class CVRP:
                         if j_node != i_cust_node
                     )
 
-                    prob += (u[(i_cust_node, k_idx)] >= is_i_serviced_by_k,)
-                    prob += (
-                        u[(i_cust_node, k_idx)] <= n_customers * is_i_serviced_by_k,
-                    )
+                    prob += u[(i_cust_node, k_idx)] >= is_i_serviced_by_k
+                    prob += u[(i_cust_node, k_idx)] <= n_customers * is_i_serviced_by_k
 
                     for j_cust_node in customer_nodes:
                         if i_cust_node == j_cust_node:
@@ -273,7 +271,7 @@ class CVRP:
                             u[(i_cust_node, k_idx)]
                             - u[(j_cust_node, k_idx)]
                             + n_customers * x[(i_cust_node, j_cust_node, k_idx)]
-                            <= n_customers - 1,
+                            <= n_customers - 1
                         )
 
     def _greedy_reconstruct_paths_lp(self, x, n, p) -> list[list[int]]:
